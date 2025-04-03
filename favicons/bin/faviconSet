@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+
+set -e  # Exit on error
+set -u  # Treat unset variables as errors
+set -o pipefail  # Catch errors in pipelines
+
+# Ensure dependencies exist
+for cmd in scour inkscape optipng; do
+    if ! command -v "${cmd}" &>/dev/null; then
+        echo "Error: ${cmd} is not installed." >&2
+        exit 1
+    fi
+done
+
+# Check for ImageMagick and determine correct command
+if command -v magick &>/dev/null; then
+    IMAGEMAGICK_CMD="magick convert"
+elif command -v convert &>/dev/null; then
+    IMAGEMAGICK_CMD="convert"
+else
+    echo "Error: ImageMagick is not installed." >&2
+    exit 1
+fi
+
+
+# Check input arguments
+if [[ $# -eq 0 ]]; then
+    echo "Usage: $0 input_favicon.svg"
+    exit 1
+fi
+
+SVG_SOURCE="$1"
+
+# Ensure input file exists
+if [[ ! -f "${SVG_SOURCE}" ]]; then
+    echo "Error: File '${SVG_SOURCE}' not found." >&2
+    exit 1
+fi
+
+# Detect if inside a Hugo site
+HUGO_ASSETS_DIR="assets/icons"
+if [[ -d "layouts" && -d "content" && (-f "config.yaml" || -f "config.toml" || -f "hugo.toml" || -f "hugo.yaml" || -f "hugo.json" || -f "config.json") ]]; then
+    echo "Hugo site detected."
+    DEFAULT_OUTPUT_DIR="${HUGO_ASSETS_DIR}"
+else
+    DEFAULT_OUTPUT_DIR="$(pwd)/output"
+fi
+
+# Ask the user for an output directory, defaulting to the detected one
+read -rp "Enter output directory [${DEFAULT_OUTPUT_DIR}]: " USER_OUTPUT_DIR
+OUTPUT_DIR="${USER_OUTPUT_DIR:-${DEFAULT_OUTPUT_DIR}}"
+
+
+# Create output directory
+OUTPUT_DIR="$(pwd)/output"
+mkdir -p "${OUTPUT_DIR}"
+
+echo "Generating optimized SVG..."
+scour "${SVG_SOURCE}" "${OUTPUT_DIR}/icon.svg" --enable-viewboxing --enable-id-stripping \
+    --enable-comment-stripping --shorten-ids --indent=none
+
+# Define icon sizes
+declare -A sizes=(
+    [favicon]=32
+    [apple-touch-icon]=180
+    [icon-192]=192
+    [icon-512]=512
+    [mstile-150x150]=150  # Microsoft Tile Icon
+)
+
+# Generate unoptimized PNGs
+for name in "${!sizes[@]}"; do
+    echo "Generating ${name}.png (${sizes[${name}]}px)..."
+    inkscape -h "${sizes[${name}]}" "${SVG_SOURCE}" --export-filename "${OUTPUT_DIR}/${name}_unoptimized.png"
+done
+
+# Optimize PNGs
+for name in "${!sizes[@]}"; do
+    echo "Optimizing ${name}.png..."
+    optipng -o7 "${OUTPUT_DIR}/${name}_unoptimized.png"
+    mv "${OUTPUT_DIR}/${name}_unoptimized.png" "${OUTPUT_DIR}/${name}.png"
+done
+
+# Convert favicon to ICO using the correct ImageMagick command
+echo "Generating favicon.ico..."
+${IMAGEMAGICK_CMD} "${OUTPUT_DIR}/favicon.png" -define icon:auto-resize=16,24,32,48,64 "${OUTPUT_DIR}/favicon.ico"
+
+# Generate PWA Manifest (JSON format)
+echo "Generating manifest.json & site.webmanifest..."
+cat > "${OUTPUT_DIR}/manifest.json" <<EOF
+{
+  "name": " ",
+  "short_name": "",
+  "description": "",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "theme_color": "#ffffff",
+  "background_color": "#ffffff",
+  "display": "standalone"
+}
+EOF
+
+# Copy manifest.json as site.webmanifest for clarity
+cp "${OUTPUT_DIR}/manifest.json" "${OUTPUT_DIR}/site.webmanifest"
+
+# Generate `browserconfig.xml` for Microsoft Edge & IE
+echo "Generating browserconfig.xml..."
+cat > "${OUTPUT_DIR}/browserconfig.xml" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<browserconfig>
+  <msapplication>
+    <tile>
+      <square150x150logo src="mstile-150x150.png"/>
+      <TileColor>#ffffff</TileColor>
+    </tile>
+  </msapplication>
+</browserconfig>
+EOF
+
+echo "✅ Favicon and icons successfully generated in ${OUTPUT_DIR}"
+echo "✅ manifest.json & site.webmanifest created for PWA support."
+echo "✅ browserconfig.xml created for Microsoft Edge/IE tile support."
+
