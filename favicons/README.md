@@ -33,7 +33,7 @@ Ensure the following dependencies are installed before running the script:
 Run the script with an SVG file as input:
 
 ```bash
-./favicon_generator.sh path/to/favicon.svg
+./bin/faviconSet path/to/favicon.svg
 ```
 
 The script will:
