@@ -3,6 +3,7 @@
 set -e  # Exit on error
 set -u  # Treat unset variables as errors
 set -o pipefail  # Catch errors in pipelines
+IFS=$'\n\t'  # Safe IFS setting
 
 # Ensure dependencies exist
 for cmd in scour inkscape optipng; do
@@ -14,22 +15,21 @@ done
 
 # Check for ImageMagick and determine correct command
 if command -v magick &>/dev/null; then
-    IMAGEMAGICK_CMD="magick convert"
+    readonly IMAGEMAGICK_CMD="magick convert"
 elif command -v convert &>/dev/null; then
-    IMAGEMAGICK_CMD="convert"
+    readonly IMAGEMAGICK_CMD="convert"
 else
     echo "Error: ImageMagick is not installed." >&2
     exit 1
 fi
 
-
 # Check input arguments
 if [[ $# -eq 0 ]]; then
-    echo "Usage: $0 input_favicon.svg"
+    echo "Usage: $0 input_favicon.svg" >&2
     exit 1
 fi
 
-SVG_SOURCE="$1"
+readonly SVG_SOURCE="$1"
 
 # Ensure input file exists
 if [[ ! -f "${SVG_SOURCE}" ]]; then
@@ -37,8 +37,14 @@ if [[ ! -f "${SVG_SOURCE}" ]]; then
     exit 1
 fi
 
+# Validate SVG format (basic check)
+if ! grep -q '<svg' "${SVG_SOURCE}" 2>/dev/null; then
+    echo "Error: '${SVG_SOURCE}' does not appear to be a valid SVG file." >&2
+    exit 1
+fi
+
 # Detect if inside a Hugo site
-HUGO_ASSETS_DIR="assets/icons"
+readonly HUGO_ASSETS_DIR="assets/icons"
 if [[ -d "layouts" && -d "content" && (-f "config.yaml" || -f "config.toml" || -f "hugo.toml" || -f "hugo.yaml" || -f "hugo.json" || -f "config.json") ]]; then
     echo "Hugo site detected."
     DEFAULT_OUTPUT_DIR="${HUGO_ASSETS_DIR}"
@@ -50,14 +56,24 @@ fi
 read -rp "Enter output directory [${DEFAULT_OUTPUT_DIR}]: " USER_OUTPUT_DIR
 OUTPUT_DIR="${USER_OUTPUT_DIR:-${DEFAULT_OUTPUT_DIR}}"
 
+# Create output directory (with error handling)
+if ! mkdir -p "${OUTPUT_DIR}"; then
+    echo "Error: Failed to create output directory '${OUTPUT_DIR}'." >&2
+    exit 1
+fi
 
-# Create output directory
-OUTPUT_DIR="$(pwd)/output"
-mkdir -p "${OUTPUT_DIR}"
+# Verify we can write to the output directory
+if [[ ! -w "${OUTPUT_DIR}" ]]; then
+    echo "Error: Cannot write to output directory '${OUTPUT_DIR}'." >&2
+    exit 1
+fi
 
 echo "Generating optimized SVG..."
-scour "${SVG_SOURCE}" "${OUTPUT_DIR}/icon.svg" --enable-viewboxing --enable-id-stripping \
-    --enable-comment-stripping --shorten-ids --indent=none
+if ! scour "${SVG_SOURCE}" "${OUTPUT_DIR}/icon.svg" --enable-viewboxing --enable-id-stripping \
+    --enable-comment-stripping --shorten-ids --indent=none; then
+    echo "Error: Failed to optimize SVG." >&2
+    exit 1
+fi
 
 # Define icon sizes
 declare -A sizes=(
@@ -70,24 +86,36 @@ declare -A sizes=(
 
 # Generate unoptimized PNGs
 for name in "${!sizes[@]}"; do
-    echo "Generating ${name}.png (${sizes[${name}]}px)..."
-    inkscape -h "${sizes[${name}]}" "${SVG_SOURCE}" --export-filename "${OUTPUT_DIR}/${name}_unoptimized.png"
+    size="${sizes[${name}]}"
+    echo "Generating ${name}.png (${size}px)..."
+    if ! inkscape -h "${size}" "${SVG_SOURCE}" --export-filename "${OUTPUT_DIR}/${name}_unoptimized.png" 2>/dev/null; then
+        echo "Error: Failed to generate ${name}.png." >&2
+        exit 1
+    fi
 done
 
 # Optimize PNGs
 for name in "${!sizes[@]}"; do
     echo "Optimizing ${name}.png..."
-    optipng -o7 "${OUTPUT_DIR}/${name}_unoptimized.png"
-    mv "${OUTPUT_DIR}/${name}_unoptimized.png" "${OUTPUT_DIR}/${name}.png"
+    if ! optipng -o7 "${OUTPUT_DIR}/${name}_unoptimized.png" 2>/dev/null; then
+        echo "Warning: Failed to optimize ${name}.png, using unoptimized version." >&2
+    fi
+    if ! mv "${OUTPUT_DIR}/${name}_unoptimized.png" "${OUTPUT_DIR}/${name}.png"; then
+        echo "Error: Failed to rename ${name}_unoptimized.png." >&2
+        exit 1
+    fi
 done
 
 # Convert favicon to ICO using the correct ImageMagick command
 echo "Generating favicon.ico..."
-${IMAGEMAGICK_CMD} "${OUTPUT_DIR}/favicon.png" -define icon:auto-resize=16,24,32,48,64 "${OUTPUT_DIR}/favicon.ico"
+if ! ${IMAGEMAGICK_CMD} "${OUTPUT_DIR}/favicon.png" -define icon:auto-resize=16,24,32,48,64 "${OUTPUT_DIR}/favicon.ico" 2>/dev/null; then
+    echo "Error: Failed to generate favicon.ico." >&2
+    exit 1
+fi
 
 # Generate PWA Manifest (JSON format)
 echo "Generating manifest.json & site.webmanifest..."
-cat > "${OUTPUT_DIR}/manifest.json" <<EOF
+if ! cat > "${OUTPUT_DIR}/manifest.json" <<'EOF'
 {
   "name": " ",
   "short_name": "",
@@ -109,13 +137,20 @@ cat > "${OUTPUT_DIR}/manifest.json" <<EOF
   "display": "standalone"
 }
 EOF
+then
+    echo "Error: Failed to generate manifest.json." >&2
+    exit 1
+fi
 
 # Copy manifest.json as site.webmanifest for clarity
-cp "${OUTPUT_DIR}/manifest.json" "${OUTPUT_DIR}/site.webmanifest"
+if ! cp "${OUTPUT_DIR}/manifest.json" "${OUTPUT_DIR}/site.webmanifest"; then
+    echo "Error: Failed to create site.webmanifest." >&2
+    exit 1
+fi
 
 # Generate `browserconfig.xml` for Microsoft Edge & IE
 echo "Generating browserconfig.xml..."
-cat > "${OUTPUT_DIR}/browserconfig.xml" <<EOF
+if ! cat > "${OUTPUT_DIR}/browserconfig.xml" <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <browserconfig>
   <msapplication>
@@ -126,6 +161,10 @@ cat > "${OUTPUT_DIR}/browserconfig.xml" <<EOF
   </msapplication>
 </browserconfig>
 EOF
+then
+    echo "Error: Failed to generate browserconfig.xml." >&2
+    exit 1
+fi
 
 echo "✅ Favicon and icons successfully generated in ${OUTPUT_DIR}"
 echo "✅ manifest.json & site.webmanifest created for PWA support."
